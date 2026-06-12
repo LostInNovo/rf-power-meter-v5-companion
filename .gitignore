@@ -1,6 +1,10 @@
 # build output
 bin/
 obj/
+publish_out/
+
+# release artifacts (published as GitHub release assets, not committed)
+*.zip
 
 # IDE
 .vs/
