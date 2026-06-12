@@ -1,0 +1,12 @@
+# build output
+bin/
+obj/
+
+# IDE
+.vs/
+.idea/
+*.user
+*.suo
+
+# logs the app writes locally
+*.csv
