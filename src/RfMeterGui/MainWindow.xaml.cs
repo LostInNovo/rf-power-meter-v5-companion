@@ -5,8 +5,6 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
 using System.Windows.Threading;
-using Line = System.Windows.Shapes.Line;
-using Polyline = System.Windows.Shapes.Polyline;
 
 namespace RfMeterGui;
 
@@ -22,15 +20,18 @@ namespace RfMeterGui;
 /// </summary>
 public partial class MainWindow : Window
 {
-    /// <summary>One chart point: the avg/min/max of the samples that arrived in one UI tick.</summary>
-    private readonly record struct ChartBin(DateTime Time, double Avg, double Min, double Max);
-
     private readonly SerialWorker _meter = new();
     private readonly DispatcherTimer _uiTimer;
 
-    /// <summary>Rolling history of chart bins; capacity covers the longest window (5 min at ~20 bins/s).</summary>
-    private readonly List<ChartBin> _chartBins = new(MaxChartBins + 64);
+    /// <summary>Rolling history of chart points; capacity covers the longest window (5 min at ~20 bins/s).
+    /// <see cref="ChartSample"/> is defined by <see cref="SignalChart"/>, which renders this list.</summary>
+    private readonly List<ChartSample> _chartBins = new(MaxChartBins + 64);
     private const int MaxChartBins = 6000;
+
+    // Connection status dot colors (toolbar Ellipse): idle grey, connected violet, error red.
+    private static readonly Brush DotConnected = new SolidColorBrush(Color.FromRgb(0xC0, 0x84, 0xFC));
+    private static readonly Brush DotIdle = new SolidColorBrush(Color.FromRgb(0x5B, 0x55, 0x75));
+    private static readonly Brush DotError = new SolidColorBrush(Color.FromRgb(0xF8, 0x71, 0x71));
 
     // Running statistics since the last "Reset" click.
     private double _statMinDbm = double.PositiveInfinity;
@@ -133,6 +134,17 @@ public partial class MainWindow : Window
 
     private void RescanPortsButton_Click(object sender, RoutedEventArgs e) => PopulatePortList();
 
+    // Custom title-bar caption buttons (the window runs borderless with WindowChrome).
+    private void MinimizeButton_Click(object sender, RoutedEventArgs e) => WindowState = WindowState.Minimized;
+
+    private void MaximizeButton_Click(object sender, RoutedEventArgs e)
+    {
+        WindowState = WindowState == WindowState.Maximized ? WindowState.Normal : WindowState.Maximized;
+        MaximizeButton.Content = WindowState == WindowState.Maximized ? "" : ""; // restore / maximize glyph
+    }
+
+    private void CloseButton_Click(object sender, RoutedEventArgs e) => Close();
+
     /// <summary>Toggle the connection. On connect, also poll the meter's settings once.</summary>
     private async void ConnectButton_Click(object sender, RoutedEventArgs e)
     {
@@ -160,6 +172,7 @@ public partial class MainWindow : Window
         PortCombo.IsEnabled = BaudRateBox.IsEnabled = RescanPortsButton.IsEnabled = false;
         ReadFromMeterButton.IsEnabled = SampleRateCombo.IsEnabled = true;
         ConnectionStatusText.Text = $"{port} @ {baud}";
+        StatusDot.Fill = DotConnected;
         _lastTotalRecords = 0;
         _lastRateUpdateAt = _lastDataReceivedAt = DateTime.UtcNow;
         _uiTimer.Start();
@@ -183,6 +196,7 @@ public partial class MainWindow : Window
         PortCombo.IsEnabled = BaudRateBox.IsEnabled = RescanPortsButton.IsEnabled = true;
         ReadFromMeterButton.IsEnabled = SendToMeterButton.IsEnabled = SampleRateCombo.IsEnabled = false;
         ConnectionStatusText.Text = "disconnected";
+        StatusDot.Fill = DotIdle;
     }
 
     /// <summary>Serial thread died (cable pulled, port stolen, …) — reflect that in the UI.</summary>
@@ -192,6 +206,7 @@ public partial class MainWindow : Window
         {
             DisconnectAndResetUi();
             ConnectionStatusText.Text = $"port error: {message}";
+            StatusDot.Fill = DotError;
         });
     }
 
@@ -250,8 +265,7 @@ public partial class MainWindow : Window
             ShowSettingsError("frequency must be 1..9999 MHz");
             return;
         }
-        if (!double.TryParse(AttenuationBox.Text.Trim(), NumberStyles.Float, Inv, out var attenuation) &&
-            !double.TryParse(AttenuationBox.Text.Trim(), out attenuation))
+        if (!TryParseUserNumber(AttenuationBox.Text, out var attenuation))
         {
             ShowSettingsError("invalid attenuation");
             return;
@@ -483,7 +497,7 @@ public partial class MainWindow : Window
             _lastDataReceivedAt = now;
             var avg = bin.Avg;
 
-            _chartBins.Add(new ChartBin(now, avg, bin.Min, bin.Max));
+            _chartBins.Add(new ChartSample(now, avg, bin.Min, bin.Max));
             if (_chartBins.Count > MaxChartBins) _chartBins.RemoveRange(0, _chartBins.Count - MaxChartBins);
 
             DbmReadoutText.Text = avg.ToString("+0.0;-0.0", Inv);
@@ -536,7 +550,7 @@ public partial class MainWindow : Window
             }
         }
 
-        RedrawChart(now);
+        TimeSeriesChart.Update(_chartBins, now, SelectedChartWindowSeconds(), MaxTraceCheck.IsChecked == true, _peakHoldDbm);
     }
 
     /// <summary>
@@ -548,8 +562,7 @@ public partial class MainWindow : Window
     private void ProcessTriggerCapture(double avg)
     {
         if (TriggerEnableCheck.IsChecked != true) { _triggerArmed = true; _triggerBinsAbove = 0; return; }
-        if (!double.TryParse(TriggerThresholdBox.Text.Trim(), NumberStyles.Float, Inv, out var threshold) &&
-            !double.TryParse(TriggerThresholdBox.Text.Trim(), out threshold)) return;
+        if (!TryParseUserNumber(TriggerThresholdBox.Text, out var threshold)) return;
 
         if (_triggerArmed)
         {
@@ -571,6 +584,16 @@ public partial class MainWindow : Window
             _triggerArmed = true;
             TriggerStatusText.Text = "armed";
         }
+    }
+
+    /// <summary>
+    /// Parse a number the user typed, accepting either '.' or ',' as the decimal separator
+    /// (invariant culture first, then the local culture). False on blank/garbage.
+    /// </summary>
+    private static bool TryParseUserNumber(string text, out double value)
+    {
+        text = text.Trim();
+        return double.TryParse(text, NumberStyles.Float, Inv, out value) || double.TryParse(text, out value);
     }
 
     /// <summary>dBm to watts: P = 10^((dBm − 30) / 10).</summary>
@@ -600,107 +623,6 @@ public partial class MainWindow : Window
         3 => 300,
         _ => 60,
     };
-
-    private static readonly Brush GridBrush = new SolidColorBrush(Color.FromRgb(0x2A, 0x31, 0x3B));
-    private static readonly Brush LabelBrush = new SolidColorBrush(Color.FromRgb(0x6E, 0x7B, 0x8C));
-    private static readonly Brush AvgTraceBrush = new SolidColorBrush(Color.FromRgb(0x7C, 0xE3, 0x8B));
-    private static readonly Brush MaxTraceBrush = new SolidColorBrush(Color.FromRgb(0xE8, 0xB4, 0x5A));
-    private static readonly Brush PeakLineBrush = new SolidColorBrush(Color.FromRgb(0xE8, 0x5A, 0x5A));
-
-    /// <summary>
-    /// Redraw the scrolling chart: auto-ranged dBm grid, time grid, the average and
-    /// per-bin-max traces over the selected window, and the dashed peak-hold line.
-    /// Rebuilt from scratch each tick — a few dozen elements at 20 Hz is cheap.
-    /// </summary>
-    private void RedrawChart(DateTime now)
-    {
-        double width = ChartCanvas.ActualWidth, height = ChartCanvas.ActualHeight;
-        if (width < 60 || height < 60) return;
-        ChartCanvas.Children.Clear();
-
-        int windowSec = SelectedChartWindowSeconds();
-        var cutoff = now.AddSeconds(-windowSec);
-
-        // Find the first bin inside the visible window (bins are time-ordered).
-        int firstVisible = _chartBins.Count;
-        for (int i = _chartBins.Count - 1; i >= 0; i--)
-        {
-            if (_chartBins[i].Time < cutoff) break;
-            firstVisible = i;
-        }
-        var visibleCount = _chartBins.Count - firstVisible;
-
-        // Auto-range the Y axis to the visible data, snapped outward to 5 dB steps.
-        double dataMin = double.PositiveInfinity, dataMax = double.NegativeInfinity;
-        for (int i = firstVisible; i < _chartBins.Count; i++)
-        {
-            if (_chartBins[i].Min < dataMin) dataMin = _chartBins[i].Min;
-            if (_chartBins[i].Max > dataMax) dataMax = _chartBins[i].Max;
-        }
-        if (visibleCount == 0) { dataMin = -90; dataMax = 0; }
-
-        double axisLo = Math.Floor((dataMin - 2) / 5.0) * 5.0;
-        double axisHi = Math.Ceiling((dataMax + 2) / 5.0) * 5.0;
-        if (axisHi - axisLo < 10) { var center = (axisHi + axisLo) / 2.0; axisLo = center - 5; axisHi = center + 5; }
-        axisLo = Math.Max(axisLo, -110);
-        axisHi = Math.Min(axisHi, 30);
-
-        double Y(double dbm) => height - (dbm - axisLo) / (axisHi - axisLo) * height;
-        double X(DateTime t) => width - (now - t).TotalSeconds / windowSec * width;
-
-        // Horizontal (dBm) gridlines with labels, at a step that yields at most 9 lines.
-        double span = axisHi - axisLo;
-        double step = new[] { 1.0, 2.0, 5.0, 10.0, 20.0 }.First(s => span / s <= 9);
-        for (double v = Math.Ceiling(axisLo / step) * step; v <= axisHi + 0.001; v += step)
-        {
-            double y = Y(v);
-            ChartCanvas.Children.Add(new Line { X1 = 0, X2 = width, Y1 = y, Y2 = y, Stroke = GridBrush, StrokeThickness = 1 });
-            var label = new TextBlock { Text = v.ToString("0", Inv), Foreground = LabelBrush, FontSize = 10 };
-            Canvas.SetLeft(label, 3);
-            Canvas.SetTop(label, y - 14);
-            ChartCanvas.Children.Add(label);
-        }
-
-        // Vertical (time) gridlines with seconds-ago labels.
-        for (int k = 1; k < 5; k++)
-        {
-            double secondsBack = windowSec * k / 5.0;
-            double x = width - secondsBack / windowSec * width;
-            ChartCanvas.Children.Add(new Line { X1 = x, X2 = x, Y1 = 0, Y2 = height, Stroke = GridBrush, StrokeThickness = 1 });
-            var label = new TextBlock { Text = $"-{secondsBack:0}s", Foreground = LabelBrush, FontSize = 10 };
-            Canvas.SetLeft(label, x + 3);
-            Canvas.SetTop(label, height - 16);
-            ChartCanvas.Children.Add(label);
-        }
-
-        // Data traces: per-bin max envelope (optional) under the average line.
-        if (visibleCount > 0)
-        {
-            var avgPoints = new PointCollection(visibleCount);
-            var maxPoints = new PointCollection(visibleCount);
-            for (int i = firstVisible; i < _chartBins.Count; i++)
-            {
-                var bin = _chartBins[i];
-                double x = X(bin.Time);
-                avgPoints.Add(new Point(x, Y(bin.Avg)));
-                maxPoints.Add(new Point(x, Y(bin.Max)));
-            }
-            if (MaxTraceCheck.IsChecked == true)
-                ChartCanvas.Children.Add(new Polyline { Points = maxPoints, Stroke = MaxTraceBrush, StrokeThickness = 1, Opacity = 0.8 });
-            ChartCanvas.Children.Add(new Polyline { Points = avgPoints, Stroke = AvgTraceBrush, StrokeThickness = 1.6 });
-        }
-
-        // Dashed peak-hold line, when it falls inside the visible range.
-        if (!double.IsNegativeInfinity(_peakHoldDbm) && _peakHoldDbm >= axisLo && _peakHoldDbm <= axisHi)
-        {
-            double y = Y(_peakHoldDbm);
-            ChartCanvas.Children.Add(new Line
-            {
-                X1 = 0, X2 = width, Y1 = y, Y2 = y,
-                Stroke = PeakLineBrush, StrokeThickness = 1, StrokeDashArray = new DoubleCollection { 4, 4 },
-            });
-        }
-    }
 
     /// <summary>Shut everything down cleanly when the window closes.</summary>
     private void Window_Closing(object? sender, System.ComponentModel.CancelEventArgs e)
