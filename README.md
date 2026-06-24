@@ -26,6 +26,8 @@ It speaks the **stock firmware's protocol** — nothing gets flashed, your facto
 
 And the part that took actual work: **the full serial protocol, reverse-engineered and verified against real hardware, is documented in [PROTOCOL.md](PROTOCOL.md)**. Live byte captures + a decompile of the vendor exe, cross-checked. Want to write your own client in Python on Linux? Everything you need is in there.
 
+Want to know how the app itself works, end to end — the threading, the parser, every feature, the chart rendering? That's all in [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md).
+
 ## Download & run (just want the app)
 
 **[⬇ Grab the latest release](https://github.com/LostInNovo/rf-power-meter-v5-companion/releases/latest)**, unzip, run `RfMeterGui.exe`. That's it:
