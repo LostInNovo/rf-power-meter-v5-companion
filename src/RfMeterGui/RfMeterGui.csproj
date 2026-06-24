@@ -9,6 +9,8 @@
     <AssemblyName>RfMeterGui</AssemblyName>
     <RootNamespace>RfMeterGui</RootNamespace>
     <ApplicationIcon>app.ico</ApplicationIcon>
+    <Version>1.1.0</Version>
+    <Product>RF Power Meter V5 Companion</Product>
   </PropertyGroup>
 
   <ItemGroup>
